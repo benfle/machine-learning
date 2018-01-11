@@ -1,0 +1,2 @@
+{:deps
+ {org.clojure/spec.alpha {:mvn/version "0.1.143"}}}
