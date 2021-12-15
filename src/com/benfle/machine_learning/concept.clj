@@ -1,167 +1,158 @@
 (ns com.benfle.machine-learning.concept
-  "From Chapter 2 of Tom M. Mitchell's \"Machine Learning\"."
+  "Concept Learning from Chapter 2 of Tom Mitchell's \"Machine Learning\"."
   (:require [clojure.set :as set]))
 
-;; Training example
-
-(defrecord TrainingExample [data positive?])
-
 (def training-examples
-  (map #(map->TrainingExample
-         {:data (zipmap [:sky :air-temp :humidity :wind :water :forecast]
-                        (butlast %))
-          :positive? (last %)})
-       [[:sunny :warm :normal :strong :warm :same   true ]
-        [:sunny :warm :high   :strong :warm :same   true ]
-        [:rainy :cold :high   :strong :warm :change false]
-        [:sunny :warm :high   :strong :cool :change true ]]))
+  [[:sunny :warm :normal :strong :warm :same   true ]
+   [:sunny :warm :high   :strong :warm :same   true ]
+   [:rainy :cold :high   :strong :warm :change false]
+   [:sunny :warm :high   :strong :cool :change true ]])
 
-;; An hypothesis is represented as a map mapping
-;; and attribute to:
+(defn values
+  "The set of possible values at `idx`."
+  [examples idx]
+  (set (map #(nth % idx) examples)))
+
+;; An hypothesis is represented as a vector of constraints:
 ;;  ?        Any value is acceptable
 ;;  ∅        No value is acceptable
 ;;  <value>  Specifc value is required
 
-(defn predict
-  "Predict the result based on the hypothesis."
-  [hypothesis data]
-  (not
-   (some (fn [[attr expect]]
-           (or (= '∅ expect)
-               (and (not= expect '?)
-                    (not= expect (get data attr)))))
-         hypothesis)))
+(defn match?
+  "Whether the value matches the constraint."
+  [constraint value]
+  (case constraint
+    ∅ false
+    ? true
+    (= constraint value)))
 
-(defn consistent?
-  "Whether the hypothesis is consistent with the example."
-  [hypothesis example]
-  (= (predict hypothesis (:data example))
-     (:positive? example)))
+(defn positive?
+  "Whether the hypothesis classifies the instance as positive."
+  [hypothesis instance]
+  (every? identity
+          (map match?
+               hypothesis
+               instance)))
+
+;; General-to-Specific Ordering of Hypthesis
+;; Note: This is a partial order.
+
+(defn most-general-hypothesis  [example] (vec (repeat (dec (count example)) '?)))
+(defn most-specific-hypothesis [example] (vec (repeat (dec (count example)) '∅)))
+
+(defn more-general?
+  "Whether the hypothesis `h1` is more general than the hypothesis `h2`."
+  [h1 h2]
+  (every? identity
+          (map #(or (= %1 '?)
+                    (= %1 %2))
+               h1
+               h2)))
+
+;; FIND-S: Finding a maximally specific hypothesis
 
 (defn generalize
   "Generalize the hypothesis to be consistent with the example."
   [hypothesis example]
-  (->> hypothesis
-       (map (fn [[attr value]]
-              [attr (cond
-                      (= value '?) value
-                      (= value '∅) (get (:data example) attr)
-                      (= value (get (:data example) attr)) value
-                      :else '?)]))
-       (into {})))
-
-(defn minimal-specializations
-  "Minimally specialize an hypothesis to cover a negative example."
-  [hypothesis examples example]
-  (mapcat (fn [[attr value]]
-            (when (= value '?)
-              (map #(assoc hypothesis attr %)
-                   (disj (->> examples
-                              (map #(get (:data %) attr))
-                              set)
-                         (get (:data example) attr)))))
-          hypothesis))
-
-(defn maximally-specific-hypothesis
-  [example]
-  (zipmap (keys (:data example))
-          (repeat '∅)))
-
-(defn maximally-general-hypothesis
-  [example]
-  (zipmap (keys (:data example))
-          (repeat '?)))
-
-(defn more-specific?
-  "Whether h1 is strictly more specific to h2.
-
-  Since  the relation only defines a *partial* order
-  on the hypothesis space, (more-general? h1 h2)
-  doesn't follow from (not (more-specific? h1 h2))."
-  [h1 h2]
-  (and (not= h1 h2)
-       (every? #(or (= (h2 %) '?)
-                    (= (h2 %) (h1 %)))
-               (keys h1))))
-
-(defn more-general?
-  "Whether h1 is strictly more general to h2."
-  [h1 h2]
-  (and (not= h1 h2)
-       (every? #(or (= (h1 %) '?)
-                    (= (h1 %) (h2 %)))
-               (keys h1))))
-
-;; find-s algorithm
+  (mapv #(cond
+           (= %1 '?) '?
+           (= %1 '∅) %2
+           (= %1 %2) %1
+           :else     '?)
+        hypothesis
+        example))
 
 (defn find-s
   "The maximally specific hypothesis that is consistent will all positive examples."
   [examples]
   (loop [[example & tail] examples
-         hypothesis (maximally-specific-hypothesis (first examples))]
-    (println "example" example)
-    (println "hypothesis" hypothesis)
+         hypothesis (most-specific-hypothesis (first examples))]
+    (tap> {:example example
+           :hypothesis hypothesis})
     (if-not example
       hypothesis
       (recur tail
-             (if-not (:positive? example)
+             (if-not (last example)
                hypothesis
                (generalize hypothesis example))))))
 
-(defn set-remove
-  "Remove from the set the elements that do not match the given predicate."
-  [pred s]
-  (set (remove pred s)))
+;; CANDIDATE-ELIMINATION ALGORITHM
 
-(defn trace [o] (println o) o)
+(defn consistent?
+  "Whether the hypothesis is consistent with the training example."
+  [hypothesis example]
+  (= (positive? hypothesis (butlast example))
+     (last example)))
+
+(defn minimal-specializations
+  "Minimally specialize an hypothesis to cover a negative example."
+  [hypothesis examples example]
+  (->> hypothesis
+       (map-indexed (fn [idx expect]
+                      (when (= expect '?)
+                        (mapv #(assoc hypothesis idx %)
+                              (disj (values examples idx)
+                                    (nth example idx))))))
+       (apply concat)))
 
 (defn candidate-elimination
   "The version space for this set of training examples.
 
   The version space is represented as a map with the following keys:
-  G the set of maximally general  hypotheses consistent with the examples
-  S the set of maximally specific hypotheses consistent with the examples"
+  :G the set of maximally general  hypotheses consistent with the examples
+  :S the set of maximally specific hypotheses consistent with the examples"
   [examples]
   (loop [[example & tail] examples
-         {:keys [G S] :as vs} {:G #{(maximally-general-hypothesis example)}
-                               :S #{(maximally-specific-hypothesis example)}}]
-    (println "")
-    (println "S" S)
-    (println "G" G)
+         {:keys [G S] :as vs} {:G #{(most-general-hypothesis  example)}
+                               :S #{(most-specific-hypothesis example)}}]
+    (tap> {:G G :S S})
     (if-not example
       vs
-      (let [not-consistent? #(not (consistent? % example))]
-        (if (:positive? example)
-          (let [G (set-remove not-consistent? G)]
-            (recur tail
-                   {:G G
-                    :S (let [S (set/union
-                                (set-remove not-consistent? S)
-                                (->> (filter not-consistent? S)
-                                     (map #(generalize % example))
-                                     (filter #(consistent? % example))
-                                     (filter (fn [s] (some #(more-general? % s) G)))
-                                     set))]
-                         (set-remove (fn [s] (some #(more-general? s %) S)) S))}))
-          (let [S (set-remove not-consistent? S)]
-            (recur tail
-                   {:G (let [G (set/union
-                                (set-remove not-consistent? S)
-                                (->> (filter not-consistent? G)
-                                     (mapcat #(minimal-specializations % examples example))
-                                     (filter #(consistent? % example))
-                                     (filter (fn [s] (some #(more-specific? % s) S)))
-                                     set))]
-                         (set-remove (fn [g] (some #(more-specific? g %) G)) G))
-                    :S S})))))))
+      (recur tail
+             (let [inconsistent? #(not (consistent? % example))]
+               (if (last example)
+                 ;; positive example
+                 (let [G (set (remove inconsistent? G))
+                       S (set/union (set (remove inconsistent? S))
+                                    (->> (filter inconsistent? S)
+                                         (map #(generalize % example))
+                                         (remove inconsistent?)
+                                         (filter (fn [h] (some #(more-general? % h) G)))
+                                         set))
+                       S (set (remove (fn [s] (some #(and (not (= s %)) (more-general? s %)) S)) S))]
+                   {:G G :S S})
+                 ;; negative example
+                 (let [S (set (remove inconsistent? S))
+                       G (set/union (set (remove inconsistent? G))
+                                    (->> (filter inconsistent? G)
+                                         (mapcat #(minimal-specializations % examples example))
+                                         (remove inconsistent?)
+                                         (filter (fn [h] (some #(more-general? h %) S)))
+                                         set))
+                       G (set (remove (fn [g] (some #(and (not (= % g)) (more-general? % g)) G)) G))]
+                   {:G G :S S})))))))
 
 (comment
 
-  (require '[com.benfle.machine-learning.concept] :reload)
-  (in-ns 'com.benfle.machine-learning.concept)
+  (require '[com.benfle.machine-learning.concept :as concept] :reload)
 
-  (def h (find-s training-examples))
+  (add-tap println)
 
-  (def vs (candidate-elimination training-examples))
+  ;; FIND-S
+  (def maximally-specific-hypothesis (concept/find-s concept/training-examples))
+  (println maximally-specific-hypothesis)
+
+  ;; CANDIDATE-ELIMINATION
+  (def version-space (concept/candidate-elimination concept/training-examples))
+  (println version-space)
+
+  ;; Version Space for http://www2.cs.uregina.ca/~dbd/cs831/notes/ml/vspace/vs_prob1.html
+  (def version-space (concept/candidate-elimination
+                      [[:japan :honda    :blue  1980 :economy true]
+                       [:japan :toyota   :green 1970 :sports  false]
+                       [:japan :toyota   :blue  1990 :economy true]
+                       [:usa   :chrysler :red   1980 :economy false]
+                       [:japan :honda    :white 1980 :economy true]]))
+  (println version-space)
 
   )
